@@ -1,0 +1,36 @@
+/***************************************************************************
+ *    ________     ___ ___         ________     _______
+ *   | ______/    /   |   \       |  _____ \   / ______\
+ *   | |         / /| | |\ \      | |     \ | | /
+ *   | |____    / /_| | |_\ \     | |_____/ | | \______
+ *   |  ____|  / ___  |  ___ \    |  _____ <   \______ \
+ *   | |      / /   | | |   \ \   | |     \ |         \ |
+ *   | |     / /    | | |    \ \  | |_____/ |   ______/ |
+ *   |_|    /_/     |_|_|     \_\ |________/   \_______/
+ *
+ * Firearms Accountability Auditability Blockchain Solution
+ *
+ * (c) 2019 FAABS.org
+ * Jim Zubov <jz@FAABS.org>
+ *
+ * GNU General Public License v3
+ * You may opt to use, copy, modify, merge, publish, distribute and/or sell
+ * copies of the Software, and permit persons to whom the Software is
+ * furnished to do so, under the terms of the COPYING file.
+ *
+ * This software is distributed on an "AS IS" basis, WITHOUT WARRANTY OF ANY
+ * KIND, either express or implied.
+ *
+ ***************************************************************************/
+
+FAABS v. 0.50 alpha
+
+/solidity :   FAABS Solidity smart contracts
+
+This is an alpha prototype of FAABS smart contracts.
+The smart contracts have not been subjected to any thorough level of testing
+or review. The code is expected to be revised and amended during further
+testing and development.
+
+The client side JS components are in development, the expected behavior of the
+client side components is documented in the smart contract annotations.
