@@ -138,6 +138,7 @@ contract FAAdata is FAAbase {
    *                         Owner's Transfer record.
    * @param mode Tmode       Transfer Record Mode, see Tmode.
    * @param status Tstatus   Transfer Record Status, see Tstatus.
+   * @param approvedAt uint48 The approval timestamp.
    * @param ePriv bytes      This field is intended to store the end-to-end
    *                         encrypted Private Transfer Key, encrypted by
    *                         ECDH(privLicenseKey, pubTransferKey) using the
@@ -147,21 +148,33 @@ contract FAAdata is FAAbase {
    *                         here, as other parties are not able to validate.
    * @param eInfo bytes      End-to-end encrypted Identity Info, encrypted by
    *                         the symmetric Access Key (see eAccess).
-   *                         IdentityInfo = 0x01 || r || s
+   *                         IdentityInfo = 0x01 || r || s || [ addrLK ]
    *                           0x01    = Version Number
-   *                           (r,s)   = ECDSA(SHA256(idRec), LK)
+   *                           (r,s)   = ECDSA(SHA256(idRec), SK)
    *                           idRec   = addrLK || addrTransfer || previous
    *                           LK      = The Owner's License Key (priv/pub/addr)
-   *                         The decrypted Identity Record allows to recover
-   *                         complimentary candidates of pubLK, verify which of
-   *                         them produces addrLK to match the Owner's
-   *                         signature, and validate the licenses for the
-   *                         license address addrLK.
+   *                           SK      = The Signer's License Key (priv/pub/addr)
+   *                                     The Signer must be either same as the
+   *                                     Owner, or have a valid agentLicense
+   *                                     issued by the Owner.
+   *                         The decrypted IdentityInfo allows to recover
+   *                         complimentary candidates of pubSK, and verify
+   *                         which one of them is consistent with the signature.
+   *                         If optional addrLK is not provided in InentityInfo,
+   *                         it means the Signer is the Owner (SK = LK), and
+   *                         addrLK for idRec is derived from pubSK.
+   *                         From the audit point of view:
+   *                         - the signature in IdentityInfo must be valid,
+   *                         - The Signer must be same as the Owner, or hold
+   *                           'agentLicense' valid as of 'approvedAt',
+   *                         - the Owner must hold a license that allows him
+   *                           to own the Device, valid as of 'approvedAt'
    ********************/
     struct Ttransfer {
 	address previous;
 	Tmode mode;
 	Tstatus status;
+	uint48 approvedAt;
 	bytes ePriv;
 	bytes eInfo;
     }
@@ -296,6 +309,13 @@ contract FAAdata is FAAbase {
    *      DeviceIssuerAddress => AuthorityAddress
    ********************/
     mapping (address => address) authorities;
+    
+  /********************
+   * @dev Agent License. Not used inside the smart contract, provided as a
+   *      reference for the client side app to validate licenses of Agents
+   *      of business or government entities.
+   ********************/
+    FAAlicense agentLicemse;
     
   /********************
    * @dev Device event, emitted when a Device is created.
@@ -514,7 +534,8 @@ contract FAAdata is FAAbase {
     
   /********************
    * @dev Create a new Transfer Record, or check if the existing one matches.
-   * @param _curr address  The current (parent) Transfer Record address.
+   * @param _curr address  The current (parent) Transfer Record address,
+   *                       oe the Device Record address for the first transfer.
    * @param _own address   The new Transfer Record address.
    * @param _ePriv bytes   The value for ePriv (see Ttransfer)
    * @param _eInfo bytes   The value for eInfo (see Ttransfer)
@@ -526,7 +547,7 @@ contract FAAdata is FAAbase {
    ********************/
     function _createTransfer(address _curr, address _own, bytes memory _ePriv, bytes memory _eInfo, Tmode _mode) internal returns (bool) {
 	require (_eInfo.length > 0);
-	require (transfers[_curr].previous != address(0) && devices[_own].issuer == address(0) && inquiries[_own].from == address(0));
+	require ((transfers[_curr].previous != address(0) || devices[_curr].issuer != address(0)) && devices[_own].issuer == address(0) && inquiries[_own].from == address(0));
 	if (transfers[_own].previous != address(0)) {
 	    require (transfers[_own].previous == _curr && transfers[_own].mode == _mode);
 	    return false;
@@ -542,7 +563,10 @@ contract FAAdata is FAAbase {
   /********************
    * @dev Validate an Assignor for a Transfer Record. Must be a current Owner's
    *      Transfer Address, a current Owner's Agent, or a valid public Assignor.
-   * @param _curr address     The current owner's Transfer Record address.
+   * @param _curr address     The current owner's Transfer Record address,
+   *                          or the Device Transfer Address for the first
+   *                          assignment (in the latter case, _assignor must
+   *                          be an official assignor).
    * @param _assignor address The address which is expected to approve this
    *                          Transfer Record. It can be the current Owner's
    *                          Transfer Record address, an Agent affiliated
@@ -565,6 +589,21 @@ contract FAAdata is FAAbase {
 	} else require ((_mode = transfers[_curr].mode) == Tmode.OWN);
     }
 
+  /********************
+   * @dev Check if the call is made by a Transfer Record of mode OWN, or by
+   *      their valid agent.
+   * @return address  The Transfer Record address of mode OWN,
+   *                  exception if none matched.
+   ********************/
+    function _chkOwner() internal view returns (address _curr) {
+	_curr = msg.sender;
+	if (transfers[_curr].mode == Tmode.AGENT) {
+	    require (transfers[_curr].status == Tstatus.APPROVED);
+	    _curr = transfers[_curr].previous;
+	}
+	require (transfers[_curr].mode == Tmode.OWN && transfers[_curr].status == Tstatus.APPROVED);
+    }
+    
   /********************
    * @dev Request a new Transfer Record through the Blockchain, share
    *      end-to-end encrypted Access Key with the previous owner, agent or
@@ -671,14 +710,16 @@ contract FAAdata is FAAbase {
    *      If the original Transfer Record request was sent off Blockchain,
    *      this function will create the Transfer Record using end-to-end
    *      encrypted data.
-   * @param _curr address  The current Owner's Transfer Record address.
+   * @param _curr address  The current Owner's Transfer Record address,
+   *                       or the Device Record for the first transfer.
    * @param _own address   The address of the Transfer Record being approved.
-   * @param _eAccess bytes32[4] End-to-end encrypted Access Keys. Any of the
+   * @param _eAccess bytes32[5] End-to-end encrypted Access Keys. Any of the
    *                            members can be 0 when not applicable:
    *                     0: AK(msg.sender) => enc(_own, msg.sender)
    *                     1: AK(_curr) => enc(_own, msg.sender)
    *                     2: AK(_own) => enc(msg.sender, _own)
    *                     3: AK(_own) => enc(_curr, _own)
+   *                     4: AK(DeviceAddr) => enc(_own, msg.sender)
    * @param _ePriv bytes   The value for ePriv of the Transfer Record for _own,
    *                       if it wasn't created yet.
    * @param _eInfo bytes   The value for e of the Transfer Record for _own,
@@ -687,8 +728,8 @@ contract FAAdata is FAAbase {
    *                       to be assigned if the record doesn't exist yet,
    *                       to be matched otherwise.
    ********************/
-    function _approveTransfer(address _curr, address _own, bytes32[4] memory _eAccess, bytes memory _ePriv, bytes memory _eInfo, Tmode _mode) internal {
-	require (transfers[_curr].status == Tstatus.APPROVED);
+    function _approveTransfer(address _curr, address _own, bytes32[5] memory _eAccess, bytes memory _ePriv, bytes memory _eInfo, Tmode _mode) internal {
+	require (transfers[_curr].status == Tstatus.APPROVED || devices[_curr].issuer != address(0));
 	require (_own != address(0));
 	Tmode amode = _chkAssignor(_curr, msg.sender);
 	if (amode == Tmode.AGENT) {
@@ -704,7 +745,9 @@ contract FAAdata is FAAbase {
 	} else {
 	    _share(msg.sender, _own, msg.sender, _eAccess[0]);
 	}
+	_share(getDevice(_curr), _own, msg.sender, _eAccess[4]);
 	transfers[_own].status = Tstatus.APPROVED;
+	transfers[_own].approvedAt = uint48(now);
     }
 
   /********************
@@ -712,12 +755,13 @@ contract FAAdata is FAAbase {
    *      owner can commit the ownership of the Device.
    * @param _curr address  The current Owner's Transfer Record address.
    * @param _own address   The address of the new Owner's Transfer Record.
-   * @param _eAccess bytes32[4] End-to-end encrypted Access Keys. Any of the
+   * @param _eAccess bytes32[5] End-to-end encrypted Access Keys. Any of the
    *                            members can be 0 when not applicable:
    *                     0: AK(msg.sender) => enc(_own, msg.sender)
    *                     1: AK(_curr) => enc(_own, msg.sender)
    *                     2: AK(_own) => enc(msg.sender, _own)
    *                     3: AK(_own) => enc(_curr, _own)
+   *                     4: AK(DeviceAddr) => enc(_own, msg.sender)
    *                       (in case if the approval is being done by an Agent,
    *                       and the new Transfer Record was communicated off
    *                       Blockchain, all 4 will be set)
@@ -726,7 +770,7 @@ contract FAAdata is FAAbase {
    * @param _eInfo bytes   The value for e of the Transfer Record for _own,
    *                       if it wasn't created yet.
    ********************/
-    function approveOwn(address _curr, address payable _own, bytes32[4] memory _eAccess, bytes memory _ePriv, bytes memory _eInfo) public payable {
+    function approveOwn(address _curr, address payable _own, bytes32[5] memory _eAccess, bytes memory _ePriv, bytes memory _eInfo) public payable {
 	uint _fee = _serviceFee(500);
 	require (_curr != address(0) && getCurrentOwner(_curr) == _curr);
 	_approveTransfer(_curr, _own, _eAccess, _ePriv, _eInfo, Tmode.OWN);
@@ -741,6 +785,8 @@ contract FAAdata is FAAbase {
    * @param _own address   The address of the new Borrower's Transfer Record.
    * @param _eAccess bytes32 End-to-end encrypted Owner's Access Keys, shared
    *                         with the Borrower.
+   * @param _eAccessDev bytes32 End-to-end encrypted Device Access Keys, shared
+   *                            with the Borrower.
    * @param _ePriv bytes   The value for ePriv of the Transfer Record for _own,
    *                       if it wasn't created yet.
    * @param _eInfo bytes   The value for e of the Transfer Record for _own,
@@ -748,10 +794,10 @@ contract FAAdata is FAAbase {
    * @param _eAccessOwn bytes32 End-to-end encrypted Borrower's Access Key,
    *                            shared with the Owner, if wasn't shared yet.
    ********************/
-    function approveBorrow(address payable _own, bytes32 _eAccess, bytes memory _ePriv, bytes memory _eInfo, bytes32 _eAccessOwn) public payable {
+    function approveBorrow(address payable _own, bytes32 _eAccess, bytes32 _eAccessDev, bytes memory _ePriv, bytes memory _eInfo, bytes32 _eAccessOwn) public payable {
 	uint _fee = _serviceFee(500);
 	require (getCurrentOwner(msg.sender) == msg.sender);
-	_approveTransfer(msg.sender, _own, [_eAccess, bytes32(0), _eAccessOwn, bytes32(0)], _ePriv, _eInfo, Tmode.BORROW);
+	_approveTransfer(msg.sender, _own, [_eAccess, bytes32(0), _eAccessOwn, bytes32(0), _eAccessDev], _ePriv, _eInfo, Tmode.BORROW);
 	_own.transfer(_fee * 4);
     }
 
@@ -762,6 +808,8 @@ contract FAAdata is FAAbase {
    * @param _own address   The address of the new Agent's Transfer Record.
    * @param _eAccess bytes32 End-to-end encrypted Owner's Access Keys, shared
    *                         with the Agent.
+   * @param _eAccessDev bytes32 End-to-end encrypted Device Access Keys, shared
+   *                            with the Agent.
    * @param _ePriv bytes   The value for ePriv of the Transfer Record for _own,
    *                       if it wasn't created yet.
    * @param _eInfo bytes   The value for e of the Transfer Record for _own,
@@ -769,10 +817,10 @@ contract FAAdata is FAAbase {
    * @param _eAccessOwn bytes32 End-to-end encrypted Agent's Access Key,
    *                            shared with the Owner, if wasn't shared yet.
    ********************/
-    function approveAgent(address payable _own, bytes32 _eAccess, bytes memory _ePriv, bytes memory _eInfo, bytes32 _eAccessOwn) public payable {
+    function approveAgent(address payable _own, bytes32 _eAccess, bytes32 _eAccessDev, bytes memory _ePriv, bytes memory _eInfo, bytes32 _eAccessOwn) public payable {
 	uint _fee = _serviceFee(1500);
 	require (getCurrentOwner(msg.sender) == msg.sender);
-	_approveTransfer(msg.sender, _own, [_eAccess, bytes32(0), _eAccessOwn, bytes32(0)], _ePriv, _eInfo, Tmode.AGENT);
+	_approveTransfer(_chkOwner(), _own, [_eAccess, bytes32(0), _eAccessOwn, bytes32(0), _eAccessDev], _ePriv, _eInfo, Tmode.AGENT);
 	_own.transfer(_fee * 12);
     }
 
@@ -786,6 +834,8 @@ contract FAAdata is FAAbase {
    * @param _own address   The address of the new Backup Transfer Record.
    * @param _eAccess bytes32 End-to-end encrypted Owner's Access Keys, shared
    *                         with the Backup holder.
+   * @param _eAccessDev bytes32 End-to-end encrypted Device Access Keys, shared
+   *                            with the Backup holder.
    * @param _ePriv bytes   The value for ePriv of the Transfer Record for _own,
    *                       if it wasn't created yet.
    * @param _eInfo bytes   The value for e of the Transfer Record for _own,
@@ -793,10 +843,9 @@ contract FAAdata is FAAbase {
    * @param _eAccessOwn bytes32 End-to-end encrypted Backup holder's Access Key,
    *                            shared with the Owner, if wasn't shared yet.
    ********************/
-    function approveBackup(address payable _own, bytes32 _eAccess, bytes memory _ePriv, bytes memory _eInfo, bytes32 _eAccessOwn) public payable {
+    function approveBackup(address payable _own, bytes32 _eAccess, bytes32 _eAccessDev, bytes memory _ePriv, bytes memory _eInfo, bytes32 _eAccessOwn) public payable {
 	uint _fee = _serviceFee(300);
-	require (getCurrentOwner(msg.sender) == msg.sender);
-	_approveTransfer(msg.sender, _own, [_eAccess, bytes32(0), _eAccessOwn, bytes32(0)], _ePriv, _eInfo, Tmode.BACKUP);
+	_approveTransfer(_chkOwner(), _own, [_eAccess, bytes32(0), _eAccessOwn, bytes32(0), _eAccessDev], _ePriv, _eInfo, Tmode.BACKUP);
 	_own.transfer(_fee * 2);
     }
 
@@ -815,21 +864,6 @@ contract FAAdata is FAAbase {
 	_serviceFee(100);
 	require (_record == msg.sender || eAccess[_record][msg.sender] != bytes32(0));
 	_share(_record, _user, msg.sender, _eAccess);
-    }
-    
-  /********************
-   * @dev Check if the call is made by a Transfer Record of mode OWN, or by
-   *      their valid agent.
-   * @return address  The Transfer Record address of mode OWN,
-   *                  exception if none matched.
-   ********************/
-    function _chkOwner() internal view returns (address _curr) {
-	_curr = msg.sender;
-	if (transfers[_curr].mode == Tmode.AGENT) {
-	    require (transfers[_curr].status == Tstatus.APPROVED);
-	    _curr = transfers[_curr].previous;
-	}
-	require (transfers[_curr].mode == Tmode.OWN && transfers[_curr].status == Tstatus.APPROVED);
     }
     
   /********************
