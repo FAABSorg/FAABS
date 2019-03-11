@@ -233,11 +233,16 @@ contract FAAdata is FAAbase {
     mapping (address => Ttransfer) public transfers;
 
   /********************
-   * @dev The Transfer Assignors
+   * @dev The Transfer Assignors or Device Record Assignors
    *      TransferAddress => AssignorAddress
+   *      or
+   *      DeviceAddress => AssignorAddress
    *      When an Assignor address is set for a particular Transfer address,
    *      it indicates that the ownership of the Device was assigned by a
    *      public authority, without the consent of the previous Owner.
+   *      An Assignor of a Device Record is a holder of a valid agentLicense
+   *      from the Isser or a Device, set if the Device was issued by such Agent
+   *      on the behalf of the Issuer.
    ********************/
     mapping (address => address) public assignors;
 
@@ -311,11 +316,12 @@ contract FAAdata is FAAbase {
     mapping (address => address) authorities;
     
   /********************
-   * @dev Agent License. Not used inside the smart contract, provided as a
-   *      reference for the client side app to validate licenses of Agents
-   *      of business or government entities.
+   * @dev Agent License. Holders of a valid Agent license from an Issuer can
+   *      issue Devices on the behalf of the Issuer. The client side app uses
+   *      agentLicense to validate licenses of Agents of business or government
+   *      entities when validating decrypted IdentityInfo in Transfer Records.
    ********************/
-    FAAlicense agentLicemse;
+    FAAlicense agentLicense;
     
   /********************
    * @dev Device event, emitted when a Device is created.
@@ -379,10 +385,12 @@ contract FAAdata is FAAbase {
    *                                 Must be issued by the Issuer of the Device
    *                                 being assigned, or by
    *                                 assignorIssuers[device.issuer] if set
+   * @param _agentLicense address    
    ********************/
-    constructor(address payable _nonprofit, address _assignorLicense) public {
+    constructor(address payable _nonprofit, address _assignorLicense, address _agentLicense) public {
 	nonprofit = _nonprofit;
 	assignorLicense = FAAlicense(_assignorLicense);
+	agentLicense = FAAlicense(_agentLicense);
     }
     
   /********************
@@ -404,36 +412,35 @@ contract FAAdata is FAAbase {
     }
 
   /********************
-   * @dev Create a new Device Record. This operation charges 21 * gas fee,
-   *      20 * gas fee to be forwarded to the Device Record address, the
-   *      rest goes to the nonprofit.
-   * @param _device address  The new Device Record address. Must be uinque
-   *                         among Devices, Transfers and Inquiries.
+   * @dev Create a new Device Record. A unique Device Record Address is derived
+   *      as a ripemd160 hash of concatenated _issuer, _class, _eInfo and
+   *      _serial.
+   * @param _issuer address  The Issuer of the Device. The transaction must be
+   *                         either submitted by the Issuer, or by a holder of
+   *                         a valid agentLicense from the Issuer.
+   *                         For the US, the Issuer is expected to be ATF.
    * @param _class address   Publicly listed device class. 0 if not applicable.
    * @param _eInfo bytes     End-to-end encrypted device info, see Tdevice.
    * @param _eAccess bytes32 End-to-end encrypted Access Key, encrypted by the
-   *                         shared secret of _device and msg.sender.
-   *                         Since the Device Address wasn't yet used as an
-   *                         originator of transactions, the public key of the
-   *                         Device is not recorded on the blockchain. The
-   *                         Issuer must be either the one generating the
-   *                         Device Record private key, or receive the public
-   *                         key off blockchain. eAccess might not be
-   *                         decryptable until the Device Address interacts
-   *                         with the blockchain.
+   *                         shared secret of _issuer and msg.sender (they
+   *                         might be the same).
    * @param _serial string   An optional public serial number or unique
    *                         reference to be assigned to the Device.
    ********************/
-    function createDevice(address payable _device, address _class, bytes memory _eInfo, bytes32 _eAccess, string memory _serial) public payable {
-	uint _fee = _serviceFee(2100);
+    function issueDevice(address _issuer, address _class, bytes memory _eInfo, bytes32 _eAccess, string memory _serial) public payable {
+	_serviceFee(200);
+	address _device = address(ripemd160(abi.encodePacked(_issuer, _class, _eInfo, _serial)));
 	require (devices[_device].current == address(0) && transfers[_device].previous == address(0) && inquiries[_device].from == address(0));
-	devices[_device].issuer = msg.sender;
+	require (msg.sender == _issuer || agentLicense.validBy(msg.sender, _issuer, now));
+	devices[_device].issuer = _issuer;
 	devices[_device].current = _device;
 	devices[_device].class = _class;
 	devices[_device].eInfo = _eInfo;
-	_share(_device, _device, msg.sender, _eAccess);
+	_share(_device, msg.sender, _issuer, _eAccess);
+	if (msg.sender != _issuer) {
+	    assignors[_device] = msg.sender;
+	}
 	_setRef(msg.sender, _device, _serial);
-	_device.transfer(_fee * 20);
     }
     
   /********************
