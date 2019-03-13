@@ -324,6 +324,36 @@ contract FAAdata is FAAbase {
     FAAlicense agentLicense;
     
   /********************
+   * @dev Total number of devices per Issuer. Used for calculating the credits
+   *      per each Device, see totalCredit.
+   *      IssuerAddr => TotalDevicesPerIssuer
+   *      Issuer address 0 matched the total number of Devices for all Issuers.
+   ********************/
+    mapping (address => uint) public totalDevices;
+    
+  /********************
+   * @dev Total credit amount per Device Issuer. Credits are funded from the
+   *      fees paid with the contract transactions, and can be claimed
+   *      proportionally by current Owners of all Devices issued by the Issuer.
+   *      The credit can be applied towards the maintenance fee, or withdrawn
+   *      into the Owner's Transfer Record wallet.
+   *      IssuerAddr => TotalCreditPerIssuer
+   ********************/
+    mapping (address => uint) public totalCredit;
+    
+  /********************
+   * @dev Total credits claimed by Owners' Transfer Records of each Device.
+   *      See totalCredit.
+   *      DeviceAddr => ClaimedCreditPerDevice
+   ********************/
+    mapping (address => uint) public claimedCredit;
+    
+  /********************
+   * @dev The running blance of the Credit due to the Owners of the Devices.
+   ********************/
+    uint creditBalance;
+    
+  /********************
    * @dev Device event, emitted when a Device is created.
    *      Allows to trace all devices created by a particular Issuer.
    * @param _issuer address The Issuer of the Device
@@ -428,7 +458,7 @@ contract FAAdata is FAAbase {
    *                         reference to be assigned to the Device.
    ********************/
     function issueDevice(address _issuer, address _class, bytes memory _eInfo, bytes32 _eAccess, string memory _serial) public payable {
-	_serviceFee(200);
+	uint _fee = _serviceFee(500);
 	address _device = address(ripemd160(abi.encodePacked(_issuer, _class, _eInfo, _serial)));
 	require (devices[_device].current == address(0) && transfers[_device].previous == address(0) && inquiries[_device].from == address(0));
 	require (msg.sender == _issuer || agentLicense.validBy(msg.sender, _issuer, now));
@@ -441,6 +471,9 @@ contract FAAdata is FAAbase {
 	    assignors[_device] = msg.sender;
 	}
 	_setRef(msg.sender, _device, _serial);
+	totalDevices[_issuer]++;
+	totalDevices[address(0)]++;
+	totalCredit[_issuer] += msg.value - _fee;
     }
     
   /********************
@@ -825,10 +858,11 @@ contract FAAdata is FAAbase {
    *                            shared with the Owner, if wasn't shared yet.
    ********************/
     function approveAgent(address payable _own, bytes32 _eAccess, bytes32 _eAccessDev, bytes memory _ePriv, bytes memory _eInfo, bytes32 _eAccessOwn) public payable {
-	uint _fee = _serviceFee(1500);
+	uint _fee = _serviceFee(2500);
 	require (getCurrentOwner(msg.sender) == msg.sender);
 	_approveTransfer(_chkOwner(), _own, [_eAccess, bytes32(0), _eAccessOwn, bytes32(0), _eAccessDev], _ePriv, _eInfo, Tmode.AGENT);
-	_own.transfer(_fee * 12);
+	_addCredit(_own, (msg.value - _fee) / 2);
+	_own.transfer((msg.value - _fee) / 2);
     }
 
   /********************
@@ -963,9 +997,11 @@ contract FAAdata is FAAbase {
    *                          (see eAccess).
    ********************/
     function inquire(address _inquiry, address payable _to, address[] memory _inquired, bytes memory _eInfo, bytes32 _eAccess) public payable {
-	uint _fee = _serviceFee(5500);
+	uint _fee = _serviceFee(10600);
 	require (transfers[_inquiry].previous == address(0) && devices[_inquiry].issuer == address(0) && inquiries[_inquiry].from == address(0));
-	for (uint i = 0; i < _inquired.length; i++) require (eAccess[_inquired[i]][_to] != bytes32(0));
+	for (uint i = 0; i < _inquired.length; i++) {
+	    require (eAccess[_inquired[i]][_to] != bytes32(0));
+	}
 	if (_eInfo.length > 0) {
 	    _share(_inquiry, _to, msg.sender, _eAccess);
 	}
@@ -974,6 +1010,7 @@ contract FAAdata is FAAbase {
 	inquiries[_inquiry].eInfo = _eInfo;
 	inquiries[_inquiry].inquired = _inquired;
 	emit Inquiry(msg.sender, _to, _inquiry);
+	_addCredit(_to, msg.value - _fee * 6);
 	_to.transfer(_fee * 5);
     }
     
@@ -1024,5 +1061,51 @@ contract FAAdata is FAAbase {
 	    responses[_inquiry].responded[_idx - inquiries[_inquiry].inquired.length] :
 	    inquiries[_inquiry].inquired[_idx];
 	_eAccess = eAccess[_addr][inquiries[_inquiry].from];
+    }
+
+  /********************
+   * @dev The credit amount available for address to be withdrawn or used
+   *      against the maintenance fee.
+   * @param _addr address The address to get credit amount for.
+   * @return uint The credit amount.
+   ********************/
+    function getCredit(address _addr) public view returns (uint _credit) {
+	address _device = getDevice(_addr);
+	address _issuer = devices[_device].issuer;
+	if (_issuer != address(0)) {
+	    if (devices[_device].current == _addr) {
+		_credit = totalCredit[_issuer] / totalDevices[_issuer] + totalCredit[address(0)] / totalDevices[address(0)];
+		if (_credit > claimedCredit[_device]) _credit -= claimedCredit[_device];
+		else _credit = 0;
+	    } else _credit = 0;
+	} else if (_addr == nonprofit) _credit = address(this).balance - creditBalance;
+	else _credit == 0;
+    }
+
+  /********************
+   * @dev Add credits for a Device Issuer. The credit is to be distributed
+   *      among all current Owners or the Devices issued by the Issuer,
+   *      can be claimed in lieu of the Service Fees, or withdrawn to the
+   *      Transfer Record wallets.
+   * @param _own address  The address of the Transfer Record. If the address
+   *                      doesn't belong to a Transfer Record, the credit are
+   *                      to be distributed among all Transfer Records for all
+   *                      Issuers.
+   * @param _credit uint  The credited amount.
+   ********************/
+    function _addCredit(address _own, uint _credit) internal {
+	totalCredit[devices[getDevice(_own)].issuer] += _credit;
+    }
+
+  /********************
+   * @dev Claim the credit amount for the address. Claimed credit cannot be
+   *      used again. In the default method, no action is taken.
+   *      Overridden in FAAdata to credit Owners' Transfer Record addresses.
+   * @param _own address  The address of the Transfer Record of the Device to
+   *                      claim the credits for.
+   * @param _credit uint  The claimed credit amount.
+   ********************/
+    function _claimCredit(address _own, uint _credit) internal {
+	claimedCredit[getDevice(_own)] += _credit;
     }
 }

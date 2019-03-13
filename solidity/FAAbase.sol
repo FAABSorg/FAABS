@@ -96,6 +96,29 @@ contract FAAbase {
     }
     
   /********************
+   * @dev The credit amount available for address to be withdrawn or used
+   *      against the maintenance fee.
+   *      In the default method, only the nonprofit is entitled to
+   *      credits of the maintenance fees.
+   *      Overridden in FAAdata to credit Owners' Transfer Record addresses.
+   * @param _addr address The address to get credit amount for.
+   * @return uint The credit amount.
+   ********************/
+    function getCredit(address _addr) public view returns (uint _credit) {
+	if (_addr == nonprofit) _credit = address(this).balance;
+    }
+
+  /********************
+   * @dev Claim the credit amount for the address. Claimed credit cannot be
+   *      used again. In the default method, no action is taken.
+   *      Overridden in FAAdata to credit Owners' Transfer Record addresses.
+   * @param _addr address The address to claim the credits for.
+   * @param _credit uint  The claimed credit amount.
+   ********************/
+    function _claimCredit(address _addr, uint _credit) internal {
+    }
+    
+  /********************
    * @dev Require a service fee to the nonprofit, as a percentage of the
    * @dev prepaid gas cost for the transaction (gas limit * gas price)
    * @dev NOTE: Due to Solidity's restrictions, it's problematic to
@@ -109,16 +132,21 @@ contract FAAbase {
    ********************/
     function _serviceFee(uint _percent) internal returns (uint _fee) {
 	_fee = (gasleft() + 21000) * tx.gasprice;
-	require (msg.value >= _fee * _percent / 100);
+	uint _credit = getCredit(msg.sender);
+	uint _due = _fee * _percent / 100;
+	require (msg.value + _credit >= _due);
+	if (_credit > 0) _claimCredit(msg.sender, _credit > _due ? _due : _credit);
     }
     
   /********************
-   * @dev Withdraw service fees collected by the contract
-   * @dev to the nonprofit entity
+   * @dev Withdraw service fees collected by the contract to the nonprofit
+   *      entity
    ********************/
     function withdraw(uint _amount) public {
-	require (msg.sender == nonprofit);
-	nonprofit.transfer(_amount);
+	uint _credit = getCredit(msg.sender);
+	require (_credit >= _amount);
+	_claimCredit(msg.sender, _credit);
+	msg.sender.transfer(_amount);
     }
 }
 
